@@ -1,0 +1,108 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check GitHub Pages is on
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if ! gh api "repos/${REPO}/pages" >/dev/null 2>&1; then
+            echo "::error::GitHub Pages is off. Turn on Settings → Pages → Source: GitHub Actions, then re-run this workflow."
+            exit 1
+          fi
+      - id: pages
+        uses: actions/configure-pages@v5
+      - name: Work out which demos this push touched
+        id: slugs
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          all=$(for d in demos/*/; do [ -f "$d/index.html" ] && basename "$d"; done)
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            BEFORE=$(git rev-parse -q --verify HEAD^ || true)
+          fi
+          if [ -z "$BEFORE" ]; then
+            touched="$all"   # first push: record everything
+          else
+            touched=$(git diff --name-only "$BEFORE" HEAD -- demos/ | awk -F/ 'NF>=3 {print $2}' | sort -u)
+          fi
+          # Only slugs that still exist; untouched ones reuse their live video.
+          touched=$(for s in $touched; do [ -f "demos/$s/index.html" ] && echo "$s"; done | tr '\n' ' ')
+          untouched=$(for s in $all; do case " $touched " in *" $s "*) ;; *) echo "$s";; esac; done | tr '\n' ' ')
+          echo "touched=$touched" >> "$GITHUB_OUTPUT"
+          echo "untouched=$untouched" >> "$GITHUB_OUTPUT"
+          echo "Touched: ${touched:-none} | Untouched: ${untouched:-none}"
+      - name: Build site
+        run: |
+          rm -rf _site && cp -r demos _site
+          node tools/build_index.mjs _site
+      - name: Keep existing videos from the live site
+        id: keep
+        env:
+          PAGES_URL: ${{ steps.pages.outputs.base_url }}
+          UNTOUCHED: ${{ steps.slugs.outputs.untouched }}
+          TOUCHED: ${{ steps.slugs.outputs.touched }}
+        run: |
+          base=$(node -p "require('./site.json').base_url || ''")
+          base=${base:-$PAGES_URL}; base=${base%/}
+          missing=""
+          for s in $UNTOUCHED; do
+            if curl -fsSL "$base/$s/demo.mp4" -o "_site/$s/demo.mp4"; then
+              curl -fsSL "$base/$s/demo-portrait.mp4" -o "_site/$s/demo-portrait.mp4" || rm -f "_site/$s/demo-portrait.mp4"
+              curl -fsSL "$base/$s/screenshot.png" -o "_site/$s/screenshot.png" || rm -f "_site/$s/screenshot.png"
+              echo "kept $s from $base"
+            else
+              rm -f "_site/$s/demo.mp4"; missing="$missing $s"; echo "no live video for $s, will record it"
+            fi
+          done
+          echo "record=${TOUCHED}${missing}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        if: steps.keep.outputs.record != ''
+        with:
+          node-version: 20
+      - name: Install Playwright
+        if: steps.keep.outputs.record != ''
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y ffmpeg >/dev/null || true
+      - name: Record touched (and missing) demos
+        if: steps.keep.outputs.record != ''
+        env:
+          RECORD: ${{ steps.keep.outputs.record }}
+        run: |
+          DEMOS_DIR=_site node tools/smoke_record.mjs $RECORD
+          for s in $RECORD; do
+            cp "out/$s/video.mp4" "_site/$s/demo.mp4"
+            cp "out/$s/video-portrait.mp4" "_site/$s/demo-portrait.mp4"
+            cp "out/$s/screenshot.png" "_site/$s/screenshot.png"
+          done
+          ls -R _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

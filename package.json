@@ -1,0 +1,14 @@
+{
+  "name": "host-and-post",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Idea -> agent PR -> checked + recorded demo -> human merge -> live on GitHub Pages -> post drafts -> human posts.",
+  "scripts": {
+    "smoke": "node tools/smoke_record.mjs",
+    "index": "node tools/build_index.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}

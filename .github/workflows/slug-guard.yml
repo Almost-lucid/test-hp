@@ -1,0 +1,39 @@
+name: slug-guard
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+permissions:
+  contents: read
+jobs:
+  slug-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check which files the PR touches
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          REPLACE: ${{ contains(github.event.pull_request.labels.*.name, 'replace') }}
+          PROTOCOL: ${{ contains(github.event.pull_request.labels.*.name, 'protocol') }}
+        run: |
+          fail=0
+          while IFS=$'\t' read -r status path rest; do
+            # Renames report the old path in $path and the new one in $rest; check both.
+            for f in "$path" $rest; do
+              case "$f" in
+                demos/*/*)
+                  slug=$(echo "$f" | cut -d/ -f2)
+                  if git cat-file -e "$BASE:demos/$slug" 2>/dev/null && [ "$REPLACE" != "true" ]; then
+                    echo "::error file=$f::demos/$slug already exists on the base branch. Pick a new slug, or add the 'replace' label."
+                    fail=1
+                  fi ;;
+                *)
+                  if [ "$PROTOCOL" != "true" ]; then
+                    echo "::error file=$f::Only demos/<new-slug>/ may change. Add the 'protocol' label for changes to the template itself."
+                    fail=1
+                  fi ;;
+              esac
+            done
+          done < <(git diff --name-status -M "$BASE" HEAD)
+          exit $fail

@@ -1,0 +1,81 @@
+name: smoke-and-record
+# Required check: runs on every PR (no paths filter) and passes as a no-op when no demo changed.
+on:
+  pull_request:
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: smoke-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  smoke-and-record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Work out changed slugs
+        id: slugs
+        run: |
+          slugs=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD -- demos/ \
+            | awk -F/ 'NF>=3 {print $2}' | sort -u \
+            | while read -r s; do [ -f "demos/$s/index.html" ] && echo "$s"; done | tr '\n' ' ')
+          echo "slugs=$slugs" >> "$GITHUB_OUTPUT"
+          if [ -z "$slugs" ]; then
+            echo "No demo changes in this PR; nothing to smoke-test or record." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Changed slugs: $slugs"
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.slugs.outputs.slugs != ''
+        with:
+          node-version: 20
+      - name: Install Playwright
+        if: steps.slugs.outputs.slugs != ''
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y ffmpeg >/dev/null || true
+      - name: Smoke test and record
+        id: run
+        if: steps.slugs.outputs.slugs != ''
+        run: |
+          python3 -m http.server 8000 --bind 127.0.0.1 >/dev/null 2>&1 &
+          sleep 1
+          BASE_URL=http://127.0.0.1:8000 node tools/smoke_record.mjs ${{ steps.slugs.outputs.slugs }}
+      - name: Upload screenshots and videos
+        id: upload
+        if: always() && steps.slugs.outputs.slugs != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-recordings
+          path: |
+            out/**/*.png
+            out/**/*.mp4
+            out/results.json
+          if-no-files-found: ignore
+      - name: Comment results on the PR
+        if: always() && steps.slugs.outputs.slugs != ''
+        uses: actions/github-script@v7
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          OUTCOME: ${{ steps.run.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            let results = [];
+            try { results = JSON.parse(fs.readFileSync('out/results.json', 'utf8')); } catch {}
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const lines = results.map(r => `- ${r.ok ? '✅' : '❌'} \`${r.slug}\`` + (r.errors.length ? '\n' + r.errors.map(e => `  - ${e}`).join('\n') : ' (no console errors, no horizontal scroll at 375px)'));
+            const body = [
+              '<!-- host-and-post:smoke -->',
+              `### Smoke test and recording: ${process.env.OUTCOME === 'success' ? 'passed' : 'failed'}`,
+              lines.join('\n') || '_No results were written; see the run log._',
+              '',
+              process.env.ARTIFACT_URL ? `📦 Screenshot (375px), landscape video and portrait video: [download artifact](${process.env.ARTIFACT_URL})` : '',
+              `Run log: ${runUrl}`,
+              '',
+              '**Gate 1:** watch the video, then merge if you want this live. Merging publishes it on GitHub Pages.',
+            ].join('\n');
+            await github.rest.issues.createComment({ ...context.repo, issue_number: context.payload.pull_request.number, body });

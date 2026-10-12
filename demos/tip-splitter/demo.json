@@ -1,0 +1,9 @@
+{
+  "title": "Tip splitter",
+  "pitch": "Split a restaurant bill between friends, tip included, in two taps.",
+  "steps": [
+    { "action": "click", "selector": "button[data-t=\"15\"]" },
+    { "action": "fill", "selector": "#people", "value": "3" },
+    { "action": "wait", "ms": 1500 }
+  ]
+}
